@@ -233,12 +233,17 @@ fn has_chatgpt_remote_user_agent_suffix(user_agent: &str) -> bool {
     let Some((name, version)) = suffix.split_once("; ") else {
         return false;
     };
-    matches!(
-        name,
-        "codex_chatgpt_android_remote" | "codex_chatgpt_ios_remote"
-    ) && !version.is_empty()
-        && !version.contains(['(', ')', ';'])
-        && !version.bytes().any(|byte| byte.is_ascii_whitespace())
+    let Some(platform) = name
+        .strip_prefix("codex_chatgpt_")
+        .and_then(|value| value.strip_suffix("_remote"))
+    else {
+        return false;
+    };
+    [platform, version].into_iter().all(|value| {
+        !value.is_empty()
+            && !value.contains(['(', ')', ';'])
+            && !value.bytes().any(|byte| byte.is_ascii_whitespace())
+    })
 }
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {

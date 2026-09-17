@@ -31,8 +31,9 @@ Client Key 通过账号分组限定路由范围：未绑定分组时可使用全
 未知客户端保持兼容，不应用版本门禁。
 
 Desktop 应用版本优先取 `version` 头，未提供时取 User-Agent 中的 `(Codex Desktop; <版本>)`。
-ChatGPT Android/iOS 远程控制会将 User-Agent 后缀改为 `(codex_chatgpt_android_remote; <版本>)` 或
-`(codex_chatgpt_ios_remote; <版本>)`。这类 Desktop 请求未提供应用版本时不应用版本门禁；Core 版本和
+ChatGPT 远程控制使用 `(codex_chatgpt_<平台>_remote; <版本>)` 形式的 User-Agent 后缀，已知平台包括
+`android` 和 `ios`。网关按该命名格式识别非空的平台名，后缀须完整，平台名和版本均不能含空白、括号或分号。
+这类 Desktop 请求未提供应用版本时不应用版本门禁；Core 版本和
 远程客户端版本不能替代 Desktop 应用版本，因此也无法保证其满足 Desktop 最低版本要求。
 携带 `version` 头或 Desktop 应用版本后缀时仍按上述规则校验，非法版本不会因远程标记而放行。
 

@@ -183,7 +183,11 @@ fn cli_user_agent_should_expose_semver_or_recognized_missing_version() {
 
 #[test]
 fn chatgpt_remote_desktop_without_app_version_should_not_use_a_version_gate() {
-    for name in ["codex_chatgpt_android_remote", "codex_chatgpt_ios_remote"] {
+    for name in [
+        "codex_chatgpt_android_remote",
+        "codex_chatgpt_ios_remote",
+        "codex_chatgpt_future_os_remote",
+    ] {
         for remote_version in ["dev", "1.2.3"] {
             for (product, originator) in [
                 ("Codex Desktop", None),
@@ -211,6 +215,10 @@ fn chatgpt_remote_marker_should_require_a_complete_exact_client_suffix() {
     for suffix in [
         "(codex_chatgpt_android_remote_extra; dev)",
         "(unofficial_codex_chatgpt_ios_remote; dev)",
+        "(codex_chatgpt__remote; dev)",
+        "(codex_chatgpt_remote; dev)",
+        "(codex_chatgpt_future os_remote; dev)",
+        "(codex_chatgpt_future;os_remote; dev)",
         "codex_chatgpt_android_remote; dev",
         "(codex_chatgpt_android_remote; dev",
         "(codex_chatgpt_android_remote; dev) trailing",

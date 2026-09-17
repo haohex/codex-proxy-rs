@@ -1972,7 +1972,11 @@ struct SessionExecution {
 
 #[tokio::test]
 async fn chatgpt_remote_responses_should_only_skip_missing_desktop_versions() {
-    for name in ["codex_chatgpt_android_remote", "codex_chatgpt_ios_remote"] {
+    for name in [
+        "codex_chatgpt_android_remote",
+        "codex_chatgpt_ios_remote",
+        "codex_chatgpt_future_os_remote",
+    ] {
         for (version, expected_code) in [
             (None, None),
             (Some("26.908.70816"), None),
