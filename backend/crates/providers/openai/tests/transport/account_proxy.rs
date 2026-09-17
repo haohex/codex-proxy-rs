@@ -334,3 +334,51 @@ async fn https_account_proxy_starts_tls_and_rejection_never_falls_back_to_direct
         );
     }
 }
+
+#[tokio::test]
+async fn websocket_socks_greeting_supports_proxies_that_reject_partial_negotiation() {
+    for scheme in ["socks5", "socks5h"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!(
+            "{scheme}://user%40exit:pass%3Aword@{}",
+            listener.local_addr().unwrap()
+        );
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // 复现实测代理的限制：首次读取不足完整方法协商时直接断开。
+            // 这里只模拟该兼容场景，并非要求正常 SOCKS 服务端假定 TCP 报文边界。
+            let mut greeting = [0; 4];
+            let count = stream.peek(&mut greeting).await.unwrap();
+            assert_eq!(count, 4, "proxy rejects an incomplete SOCKS greeting");
+            assert_eq!(greeting, [5, 2, 0, 2]);
+            socks_exit(&mut stream).await;
+            let mut stream = accept_codex_test_websocket(stream).await;
+            assert!(matches!(stream.next().await, Some(Ok(Message::Text(_)))));
+            stream
+                .send(Message::Text(
+                    completed_websocket_response("resp_complete_greeting", 2, 1).into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let client = CodexBackendClient::new(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            "http://localhost".to_owned(),
+            test_wire_profile(),
+        )
+        .for_account(&account("greeting", Some(&proxy)))
+        .unwrap();
+        let mut request = codex_request("gpt-5.5", "", Vec::new());
+        request.set_previous_response_id(Some("resp_previous".to_owned()));
+        request.previous_response_scope = Some(PreviousResponseScope::Persisted);
+        let response = timeout(
+            Duration::from_secs(5),
+            client.create_response(&request, request_context("greeting", Some("greeting"))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.body.contains("resp_complete_greeting"));
+        task.await.unwrap();
+    }
+}
