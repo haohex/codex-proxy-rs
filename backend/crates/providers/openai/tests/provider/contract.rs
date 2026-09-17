@@ -67,14 +67,13 @@ use crate::support::{
 use crate::transport::accept_codex_test_websocket;
 
 #[tokio::test]
-async fn upstream_response_model_observation_reaches_provider_snapshot_without_rewriting_response()
-{
+async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriting_it() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
     let server = MockServer::start().await;
     let body = concat!(
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_model\",\"model\":\"gpt-created\"}}\n\n",
-        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_model\",\"model\":\"gpt-returned\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_model\",\"model\":\"gpt-6-sol\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":25},\"total_tokens\":110}}}\n\n",
     );
     Mock::given(method("POST"))
         .and(path("/codex/responses"))
@@ -83,13 +82,14 @@ async fn upstream_response_model_observation_reaches_provider_snapshot_without_r
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(body),
         )
+        .expect(1)
         .mount(&server)
         .await;
     let provider = provider_with_base_url(&store, server.uri());
     let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
         ProtocolPayload::json_object(
             "openai",
-            json!({"model":"gpt-5.4","input":"hello"})
+            json!({"model":"gpt-5.6-sol","input":"hello"})
                 .as_object()
                 .unwrap()
                 .clone(),
@@ -106,8 +106,14 @@ async fn upstream_response_model_observation_reaches_provider_snapshot_without_r
         .unwrap();
     let mut observed = None;
     let mut returned = None;
+    let mut costs = Vec::new();
     while let Some(event) = stream.next().await {
         let event = event.expect("upstream response");
+        for fact in event.canonical_facts() {
+            if let GatewayEvent::CalculatedCost(cost) = fact {
+                costs.push(cost.total().amount().scaled());
+            }
+        }
         if let Some(observation) = event.response_observation() {
             observed = observation.upstream_response_model().map(str::to_owned);
         }
@@ -121,12 +127,15 @@ async fn upstream_response_model_observation_reaches_provider_snapshot_without_r
                 .map(str::to_owned);
         }
     }
-    assert_eq!(observed.as_deref(), Some("gpt-returned"));
+    let requests = server.received_requests().await.expect("upstream requests");
+    assert_eq!(captured_request_body(&requests[0])["model"], "gpt-5.4");
+    assert_eq!(costs, vec![3_437_500]);
+    assert_eq!(observed.as_deref(), Some("gpt-6-sol"));
     assert_eq!(returned, observed);
 }
 
 #[tokio::test]
-async fn websocket_model_report_reaches_observation_even_when_metadata_frame_is_internal() {
+async fn websocket_bills_sent_model_and_observes_internal_model_report() {
     for metadata_type in ["response.metadata", "codex.response.metadata"] {
         let store = Arc::new(MemoryAccountStore::default());
         create_account(&store, "acct_provider_contract").await;
@@ -135,11 +144,14 @@ async fn websocket_model_report_reaches_observation_even_when_metadata_frame_is_
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept WebSocket");
             let mut websocket = accept_codex_test_websocket(socket).await;
-            websocket.next().await.expect("request").expect("frame");
+            let request = websocket.next().await.expect("request").expect("frame");
+            let request: Value =
+                serde_json::from_str(request.to_text().expect("text")).expect("request JSON");
+            assert_eq!(request["model"], "gpt-5.4");
             for event in [
                 json!({"type":"response.created","response":{"id":"resp_model","model":"gpt-created"}}),
                 json!({"type":metadata_type,"headers":{"X-OpenAI-Model":["gpt-server-report"]}}),
-                json!({"type":"response.completed","response":{"id":"resp_model","model":"gpt-body","status":"completed","output":[]}}),
+                json!({"type":"response.completed","response":{"id":"resp_model","model":"gpt-6-astra","status":"completed","output":[],"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":25},"total_tokens":110}}}),
             ] {
                 websocket
                     .send(Message::Text(event.to_string().into()))
@@ -150,7 +162,7 @@ async fn websocket_model_report_reaches_observation_even_when_metadata_frame_is_
         let payload = ProtocolPayload::json_object(
             "openai",
             Map::from_iter([
-                ("model".to_owned(), json!("gpt-5.4")),
+                ("model".to_owned(), json!("gpt-5.6-sol")),
                 ("input".to_owned(), json!("hello")),
             ]),
         )
@@ -168,8 +180,14 @@ async fn websocket_model_report_reaches_observation_even_when_metadata_frame_is_
             .expect("provider stream");
         let mut observed = None;
         let mut returned = None;
+        let mut costs = Vec::new();
         while let Some(event) = stream.next().await {
             let event = event.expect("provider event");
+            for fact in event.canonical_facts() {
+                if let GatewayEvent::CalculatedCost(cost) = fact {
+                    costs.push(cost.total().amount().scaled());
+                }
+            }
             if let Some(observation) = event.response_observation() {
                 observed = observation.upstream_response_model().map(str::to_owned);
             }
@@ -184,12 +202,13 @@ async fn websocket_model_report_reaches_observation_even_when_metadata_frame_is_
             }
         }
         server.await.expect("server task");
+        assert_eq!(costs, vec![3_437_500]);
         assert_eq!(
             observed.as_deref(),
             Some("gpt-server-report"),
             "{metadata_type}"
         );
-        assert_eq!(returned.as_deref(), Some("gpt-body"));
+        assert_eq!(returned.as_deref(), Some("gpt-6-astra"));
     }
 }
 

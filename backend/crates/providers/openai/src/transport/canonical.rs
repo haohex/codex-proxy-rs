@@ -37,7 +37,7 @@ const CONTENTS_PER_OUTPUT: u32 = 1_024;
 /// 因而未知或形状变化的 JSON event 只能放弃 canonical 投影，不能截断 wire 流。
 pub struct CodexCanonicalDecoder {
     decoder: SseEventDecoder,
-    fallback_model: String,
+    upstream_model: String,
     response_id: Option<String>,
     started: bool,
     completed: bool,
@@ -133,10 +133,11 @@ impl CodexCanonicalFailure {
 }
 
 impl CodexCanonicalDecoder {
-    pub fn new(fallback_model: impl Into<String>) -> Self {
+    /// 使用路由后最终发往上游的请求模型计价，并在响应缺少模型时用于 canonical 兜底。
+    pub fn new(upstream_model: impl Into<String>) -> Self {
         Self {
             decoder: SseEventDecoder::default(),
-            fallback_model: fallback_model.into(),
+            upstream_model: upstream_model.into(),
             response_id: None,
             started: false,
             completed: false,
@@ -485,7 +486,7 @@ impl CodexCanonicalDecoder {
             .get("model")
             .and_then(Value::as_str)
             .filter(|model| !model.is_empty())
-            .unwrap_or(&self.fallback_model)
+            .unwrap_or(&self.upstream_model)
             .to_owned();
         self.response_id = Some(response_id.clone());
         self.started = true;
@@ -892,9 +893,9 @@ impl CodexCanonicalDecoder {
             .get("model")
             .and_then(Value::as_str)
             .filter(|model| !model.is_empty())
-            .unwrap_or(&self.fallback_model)
+            .unwrap_or(&self.upstream_model)
             .to_owned();
-        // 与用量统计统一按最终发送档位估算，响应回显不改变本地计价口径。
+        // 按最终发送的模型与档位估算，响应回显仅作观测，不改变本地计价口径。
         let service_tier = self.requested_service_tier.as_deref();
         let tool_calls = billable_tool_calls(response);
         if let Some(breakdown) = usage
@@ -902,7 +903,7 @@ impl CodexCanonicalDecoder {
             .and_then(|usage| {
                 let (web_search_calls, file_search_calls) = tool_calls?;
                 openai_billing_breakdown(
-                    &model,
+                    &self.upstream_model,
                     OpenAiBillingUsage::from(usage)
                         .with_web_search_calls(web_search_calls, self.web_search_pricing)
                         .with_file_search_calls(file_search_calls),

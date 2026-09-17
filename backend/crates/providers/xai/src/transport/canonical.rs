@@ -169,7 +169,7 @@ fn usd_price_per_million(per_token_ticks: u128) -> Option<Money> {
 pub struct GrokCanonicalDecoder {
     decoder: SseEventDecoder,
     response_transform: GrokResponseTransform,
-    fallback_model: String,
+    upstream_model: String,
     response_id: Option<String>,
     started: bool,
     completed: bool,
@@ -183,11 +183,12 @@ pub struct GrokCanonicalDecoder {
 }
 
 impl GrokCanonicalDecoder {
-    pub fn new(fallback_model: impl Into<String>) -> Self {
+    /// 使用路由后最终发往上游的请求模型计价，并在响应缺少模型时用于 canonical 兜底。
+    pub fn new(upstream_model: impl Into<String>) -> Self {
         Self {
             decoder: SseEventDecoder::default(),
             response_transform: GrokResponseTransform::default(),
-            fallback_model: fallback_model.into(),
+            upstream_model: upstream_model.into(),
             response_id: None,
             started: false,
             completed: false,
@@ -204,7 +205,7 @@ impl GrokCanonicalDecoder {
     /// 创建在 canonical 与 wire 投影处理每个上游 event 前先还原请求级 tool 别名的
     /// 解码器。
     #[must_use]
-    pub fn for_request(fallback_model: impl Into<String>, request: &GrokResponsesRequest) -> Self {
+    pub fn for_request(upstream_model: impl Into<String>, request: &GrokResponsesRequest) -> Self {
         Self {
             response_transform: request.response_transform(),
             requires_provider_cost: request.body().get("tool_choice").and_then(Value::as_str)
@@ -221,7 +222,7 @@ impl GrokCanonicalDecoder {
                             )
                         })
                     }),
-            ..Self::new(fallback_model)
+            ..Self::new(upstream_model)
         }
     }
 
@@ -453,7 +454,7 @@ impl GrokCanonicalDecoder {
             .get("model")
             .and_then(Value::as_str)
             .filter(|model| !model.is_empty())
-            .unwrap_or(&self.fallback_model)
+            .unwrap_or(&self.upstream_model)
             .to_owned();
         self.response_id = Some(response_id.clone());
         self.started = true;
@@ -660,13 +661,19 @@ impl GrokCanonicalDecoder {
             .get("model")
             .and_then(Value::as_str)
             .filter(|model| !model.is_empty())
-            .unwrap_or(&self.fallback_model)
+            .unwrap_or(&self.upstream_model)
             .to_owned();
         if let Some(cost) = provider_reported_cost(response)? {
             output.push(GatewayEvent::ProviderCost(cost));
         } else if !self.requires_provider_cost
             && let Some(cost) = usage.and_then(|usage| {
-                calculated_cost(response, &model, usage, self.response_service_tier())
+                // 已报告金额仍优先；本地估价只使用实际发送模型，响应模型仅作观测。
+                calculated_cost(
+                    response,
+                    &self.upstream_model,
+                    usage,
+                    self.response_service_tier(),
+                )
             })
         {
             output.push(GatewayEvent::CalculatedCost(cost));
