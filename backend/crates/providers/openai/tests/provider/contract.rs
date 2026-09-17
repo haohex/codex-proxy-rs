@@ -67,6 +67,133 @@ use crate::support::{
 use crate::transport::accept_codex_test_websocket;
 
 #[tokio::test]
+async fn upstream_response_model_observation_reaches_provider_snapshot_without_rewriting_response()
+{
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_model\",\"model\":\"gpt-created\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_model\",\"model\":\"gpt-returned\",\"status\":\"completed\",\"output\":[]}}\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let provider = provider_with_base_url(&store, server.uri());
+    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "openai",
+            json!({"model":"gpt-5.4","input":"hello"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+        .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))])),
+    ));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", operation),
+            context("req_model", CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+    let mut observed = None;
+    let mut returned = None;
+    while let Some(event) = stream.next().await {
+        let event = event.expect("upstream response");
+        if let Some(observation) = event.response_observation() {
+            observed = observation.upstream_response_model().map(str::to_owned);
+        }
+        if let Some(wire) = event.wire_event()
+            && wire.data().get("type").and_then(Value::as_str) == Some("response.completed")
+        {
+            returned = wire
+                .data()
+                .pointer("/response/model")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+    }
+    assert_eq!(observed.as_deref(), Some("gpt-returned"));
+    assert_eq!(returned, observed);
+}
+
+#[tokio::test]
+async fn websocket_model_report_reaches_observation_even_when_metadata_frame_is_internal() {
+    for metadata_type in ["response.metadata", "codex.response.metadata"] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_provider_contract").await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let base_url = format!("http://{}", listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept WebSocket");
+            let mut websocket = accept_codex_test_websocket(socket).await;
+            websocket.next().await.expect("request").expect("frame");
+            for event in [
+                json!({"type":"response.created","response":{"id":"resp_model","model":"gpt-created"}}),
+                json!({"type":metadata_type,"headers":{"X-OpenAI-Model":["gpt-server-report"]}}),
+                json!({"type":"response.completed","response":{"id":"resp_model","model":"gpt-body","status":"completed","output":[]}}),
+            ] {
+                websocket
+                    .send(Message::Text(event.to_string().into()))
+                    .await
+                    .expect("response");
+            }
+        });
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("hello")),
+            ]),
+        )
+        .expect("payload")
+        .with_context(Map::from_iter([("use_websocket".to_owned(), json!(true))]));
+        let mut stream = provider_with_base_url(&store, base_url)
+            .execute(
+                planned_request(
+                    "openai",
+                    Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+                ),
+                context("req_ws_model", CancellationToken::new()),
+            )
+            .await
+            .expect("provider stream");
+        let mut observed = None;
+        let mut returned = None;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("provider event");
+            if let Some(observation) = event.response_observation() {
+                observed = observation.upstream_response_model().map(str::to_owned);
+            }
+            if let Some(wire) = event.wire_event()
+                && wire.data().get("type").and_then(Value::as_str) == Some("response.completed")
+            {
+                returned = wire
+                    .data()
+                    .pointer("/response/model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+        }
+        server.await.expect("server task");
+        assert_eq!(
+            observed.as_deref(),
+            Some("gpt-server-report"),
+            "{metadata_type}"
+        );
+        assert_eq!(returned.as_deref(), Some("gpt-body"));
+    }
+}
+
+#[tokio::test]
 async fn selected_proxy_location_overrides_global_and_reloads_without_mutating_client_payload() {
     use gateway_core::account::{OutboundProxy, RequestLocation};
     let store = Arc::new(MemoryAccountStore::default());
